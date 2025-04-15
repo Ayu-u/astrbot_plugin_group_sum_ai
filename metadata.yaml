@@ -1,5 +1,32 @@
-name: helloworld # 这是你的插件的唯一识别名。
-desc: 这是 AstrBot 的默认插件，支持关键词回复。 # 插件简短描述
-version: v1.3 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: Soulter # 作者
-repo: https://github.com/Soulter/helloworld # 插件的仓库地址
+name: group-summarizer
+desc: 自动收集群聊消息并每300条进行一次总结，总结结果保存到本地
+author: zy
+version: 1.0.0
+repo: https://github.com/yourusername/astrbot-plugin-group-summarizer 
+config_schema:
+  summary_threshold:
+    type: integer
+    title: 触发总结阈值
+    description: 收集多少条消息后触发总结
+    default: 300
+    minimum: 10
+    maximum: 1000
+  max_buffer_size:
+    type: integer
+    title: 最大缓冲区大小
+    description: 每个群聊最多保存的消息数量
+    default: 500
+    minimum: 50
+    maximum: 2000
+  min_interval:
+    type: integer
+    title: 最小总结间隔(秒)
+    description: 两次总结之间的最小时间间隔，单位为秒
+    default: 3600
+    minimum: 300
+    maximum: 86400
+  summary_system_prompt:
+    type: string
+    title: 总结系统提示词
+    description: 提供给LLM的系统提示词，指导总结风格
+    default: "你是一个专业的群聊分析师，善于提取群聊中的关键信息和主要话题。"

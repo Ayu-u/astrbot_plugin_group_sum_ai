@@ -1,0 +1,37 @@
+# 群聊消息自动总结插件配置
+
+# 触发总结的消息数量阈值
+summary_threshold: 100
+
+# 每个群消息缓冲区最大容量
+max_buffer_size: 500
+
+# 两次总结之间的最小时间间隔(秒)，默认1小时
+min_interval: 360
+
+# 是否使用外部提示词文件
+use_external_prompts: true
+
+# 数据自动清理设置
+data_cleaning:
+  # 是否启用自动清理
+  enabled: true
+  # 清理检查周期(秒)，默认24小时检查一次
+  check_interval: 86400
+  # 保留总结文件的最大数量(每个群)，超过则删除最旧的
+  max_files_per_group: 30
+  # 保留总结文件的最长时间(天)，超过则删除
+  max_retention_days: 30
+
+# 总结发送设置
+sending:
+  # 是否将总结发送到群聊
+  send_to_chat: true
+  # 发送目标设置
+  target:
+    # 发送目标类型: "current" - 当前群聊, "custom" - 自定义群聊
+    type: "custom"
+    # 自定义目标群ID，当type为"custom"时生效
+    custom_group_id: "19235404447@chatroom"
+    # 当发送到自定义群聊时，是否在消息前添加原群名称
+    add_group_name_prefix: true 
