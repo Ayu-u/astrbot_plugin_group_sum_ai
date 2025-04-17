@@ -1,0 +1,103 @@
+{
+  "summary_threshold": {
+    "description": "收集多少条消息后触发总结",
+    "type": "int",
+    "hint": "达到这个数量的消息后将触发自动总结",
+    "default": 300,
+    "obvious_hint": false
+  },
+  "max_buffer_size": {
+    "description": "每个群聊最多保存的消息数量",
+    "type": "int",
+    "hint": "超过此数量后将清理最旧的消息",
+    "default": 500
+  },
+  "min_interval": {
+    "description": "两次总结之间的最小时间间隔(秒)",
+    "type": "int",
+    "hint": "即使达到消息阈值，也需要满足最小间隔才会触发总结",
+    "default": 3600
+  },
+  "summary_system_prompt": {
+    "description": "提供给LLM的系统提示词，指导总结风格",
+    "type": "string",
+    "hint": "指导大模型如何进行总结的系统提示词",
+    "default": "你是一个专业的群聊分析师，善于提取群聊中的关键信息和主要话题。"
+  },
+  "use_external_prompts": {
+    "description": "是否使用外部提示词文件",
+    "type": "bool",
+    "hint": "如果启用，将从prompts.py加载提示词模板",
+    "default": true
+  },
+  "data_cleaning": {
+    "description": "旧总结文件清理设置",
+    "type": "object",
+    "hint": "配置自动清理旧总结文件的规则",
+    "items": {
+      "enabled": {
+        "description": "是否启用自动清理",
+        "type": "bool",
+        "hint": "开启后将自动清理旧总结文件",
+        "default": true
+      },
+      "check_interval": {
+        "description": "清理检查周期(秒)",
+        "type": "int",
+        "hint": "多长时间检查一次是否有需要清理的文件",
+        "default": 86400
+      },
+      "max_files_per_group": {
+        "description": "保留总结文件的最大数量(每个群)",
+        "type": "int",
+        "hint": "超过此数量将删除最旧的总结文件",
+        "default": 30
+      },
+      "max_retention_days": {
+        "description": "保留总结文件的最长时间(天)",
+        "type": "int",
+        "hint": "超过此天数的总结文件将被删除",
+        "default": 30
+      }
+    }
+  },
+  "sending": {
+    "description": "总结发送设置",
+    "type": "object",
+    "hint": "配置总结结果的发送方式",
+    "items": {
+      "send_to_chat": {
+        "description": "是否将总结发送到群聊",
+        "type": "bool",
+        "hint": "开启后将把总结结果发送到指定群聊",
+        "default": false
+      },
+      "target": {
+        "description": "发送目标设置",
+        "type": "object",
+        "hint": "配置总结发送的目标群聊",
+        "items": {
+          "type": {
+            "description": "发送目标类型",
+            "type": "string",
+            "hint": "current - 当前群聊, custom - 自定义群聊",
+            "default": "current",
+            "options": ["current", "custom"]
+          },
+          "custom_group_id": {
+            "description": "自定义目标群ID",
+            "type": "string",
+            "hint": "当type为custom时生效，可使用/get_session_id命令获取",
+            "default": ""
+          },
+          "add_group_name_prefix": {
+            "description": "是否在消息前添加原群名称",
+            "type": "bool",
+            "hint": "当发送到自定义群聊时，是否添加原群名称前缀",
+            "default": true
+          }
+        }
+      }
+    }
+  }
+} 

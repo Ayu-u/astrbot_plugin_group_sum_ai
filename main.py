@@ -27,7 +27,7 @@ except ImportError:
     MESSAGE_FORMAT = "[{time_str}] {sender_name}: {content}"
     FEW_MESSAGES_PROMPT = ""
 
-@register("group-summarizer", "zy", "自动总结群聊消息", "1.0.0")
+@register("group-summarizer", "Ayu-u", "自动总结群聊消息", "1.0.0")
 class GroupSummarizer(Star):
     """
     群消息自动总结插件
@@ -35,10 +35,35 @@ class GroupSummarizer(Star):
     自动收集群聊消息，定期进行总结，总结结果可保存在本地或发送到群聊
     """
     
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config=None):
         super().__init__(context)
-        # 初始化配置
-        self.config = self._load_config()
+        # 使用新的配置系统
+        self.config = config
+        
+        # 如果没有配置，使用默认配置
+        if not self.config:
+            logger.warning("未找到插件配置，使用默认配置")
+            self.config = {
+                "summary_threshold": 300,
+                "max_buffer_size": 500,
+                "min_interval": 3600,
+                "summary_system_prompt": SYSTEM_PROMPT,
+                "use_external_prompts": True,
+                "data_cleaning": {
+                    "enabled": True,
+                    "check_interval": 86400,
+                    "max_files_per_group": 30,
+                    "max_retention_days": 30
+                },
+                "sending": {
+                    "send_to_chat": False,
+                    "target": {
+                        "type": "current",
+                        "custom_group_id": "",
+                        "add_group_name_prefix": True
+                    }
+                }
+            }
         
         # 创建存储目录
         self.summary_dir = "data/group_summaries"
@@ -60,70 +85,9 @@ class GroupSummarizer(Star):
             self.clean_task = asyncio.create_task(self._periodic_clean())
         
         logger.info("群消息总结插件已初始化")
-    
-    def _load_config(self) -> dict:
-        """加载插件配置"""
-        default_config = {
-            "summary_threshold": 300,  # 触发总结的消息数量阈值
-            "max_buffer_size": 500,    # 每个群消息缓冲区最大容量
-            "min_interval": 3600,      # 两次总结的最小时间间隔(秒)
-            "summary_system_prompt": SYSTEM_PROMPT,  # 从提示词文件中获取系统提示词
-            "use_external_prompts": True,  # 是否使用外部提示词
-            "data_cleaning": {
-                "enabled": True,
-                "check_interval": 86400,  # 24小时
-                "max_files_per_group": 30,
-                "max_retention_days": 30
-            },
-            "sending": {
-                "send_to_chat": False,
-                "target": {
-                    "type": "current",
-                    "custom_group_id": "",
-                    "add_group_name_prefix": True
-                }
-            }
-        }
-        
-        # 首先尝试从本地YAML文件加载配置
-        yaml_config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
-        yaml_config = {}
-        
-        if os.path.exists(yaml_config_path):
-            try:
-                with open(yaml_config_path, "r", encoding="utf-8") as f:
-                    yaml_config = yaml.safe_load(f)
-                logger.info("从本地YAML文件加载配置成功")
-            except Exception as e:
-                logger.error(f"加载本地YAML配置失败: {e}")
-        
-        try:
-            # 从AstrBot全局配置中获取插件配置
-            plugin_config = self.context.get_config().get("group_summarizer", {})
-            
-            # 合并配置，优先级: 默认配置 < AstrBot全局配置 < 本地YAML配置
-            config = default_config.copy()
-            if plugin_config:
-                config.update(plugin_config)
-                logger.info("成功从AstrBot全局配置加载插件配置")
-            
-            if yaml_config:
-                config.update(yaml_config)
-            
-            # 记录关键配置项
-            logger.info(f"群聊总结插件配置加载完成: summary_threshold={config['summary_threshold']}, "
-                        f"min_interval={config['min_interval']}秒, "
-                        f"send_to_chat={config.get('sending', {}).get('send_to_chat', False)}")
-                
-            return config
-        except Exception as e:
-            logger.error(f"加载插件配置失败: {e}，使用默认配置")
-            # 如果全局配置加载失败，但YAML配置存在，则使用YAML配置
-            if yaml_config:
-                merged_config = default_config.copy()
-                merged_config.update(yaml_config)
-                return merged_config
-            return default_config
+        logger.info(f"群聊总结配置: summary_threshold={self.config['summary_threshold']}, "
+                   f"min_interval={self.config['min_interval']}秒, "
+                   f"send_to_chat={self.config.get('sending', {}).get('send_to_chat', False)}")
     
     def _load_state(self):
         """从文件加载状态"""
