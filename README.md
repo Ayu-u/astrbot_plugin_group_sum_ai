@@ -28,6 +28,7 @@
 - `/summary_debug [计数]` - 设置消息计数器的值(仅管理员)
 - `/get_session_id` - 获取当前会话的ID信息
 - `/summary_help` - 显示插件帮助信息
+- `/summary_api_info` - 显示API相关信息（仅管理员，需启用API功能）
 
 ## 功能介绍
 
@@ -40,6 +41,7 @@
 3. **数据自动清理** - 自动清理旧的总结文件，节约存储空间
 4. **总结内容发送** - 可将总结结果发送到当前群聊或指定的群聊
 5. **自定义提示词** - 支持通过外部文件自定义详细的提示词，优化总结效果
+6. **HTTP API 接口** - 提供REST API接口，支持通过外部程序发送消息
 
 ### 总结结果查看
 
@@ -108,11 +110,140 @@ AstrBot v3.4.15+版本支持通过管理面板配置插件：
 id可以在日志中查询
 ![img_3.png](img/img_3.png)
 
+#### API 配置
+
+- **启用API** - 是否启用HTTP API功能
+- **API主机** - API服务监听的主机地址（默认0.0.0.0）
+- **API端口** - API服务监听的端口（默认9966）
+- **API令牌** - 用于API认证的令牌，首次启用时自动生成
+
 ### 配置注意事项
 
 1. 配置修改后会立即生效，不需要重启AstrBot
 2. 总结系统提示词支持直接在管理面板中编辑，无需修改prompts.py文件
 3. 如果要使用更复杂的提示词模板，建议启用"使用外部提示词文件"，并编辑prompts.py文件
+4. API令牌应妥善保管，泄露可能导致安全风险
+
+## HTTP API 接口
+
+### API 概述
+
+插件提供了HTTP API接口，允许外部程序通过API调用发送消息。默认情况下，API功能是禁用的，需要在插件配置中启用。
+
+### 查看API信息
+
+在任意群聊中发送 `/summary_api_info` 命令可以查看API相关信息，包括：
+- API访问地址和端口
+- API认证令牌
+- 简单的调用示例
+
+### API 客户端
+
+插件提供了简单的API客户端实现，可以通过命令行或集成到其他程序中使用：
+- `api_client.py` - API客户端核心库，提供API调用函数
+- `api_example.py` - 使用示例，展示如何调用API
+
+### API 接口文档
+
+#### 1. 发送消息
+
+**接口**：`POST /send`
+
+**请求头**：
+```
+Authorization: Bearer <API_TOKEN>
+Content-Type: application/json
+```
+
+**请求体**：
+```json
+{
+  "content": "消息内容或base64编码的图片",
+  "umo": "目标会话标识",
+  "type": "消息类型，text或image",
+  "callback_url": "可选，处理结果回调URL"
+}
+```
+
+**参数说明**：
+- `content`: 如果type=text，则为文本内容；如果type=image，则为Base64编码的图片内容
+- `umo`: 目标会话标识，可通过 `/get_session_id` 命令获取
+- `type`: 消息类型，可选值为"text"或"image"，默认为"text"
+- `callback_url`: 可选，消息处理完成后的回调URL
+
+**响应**：
+```json
+{
+  "status": "queued",
+  "message_id": "生成的消息ID",
+  "queue_size": 1
+}
+```
+
+#### 2. 健康检查
+
+**接口**：`GET /health`
+
+**响应**：
+```json
+{
+  "status": "ok",
+  "queue_size": 1
+}
+```
+
+#### 3. 回调通知
+
+如果提供了 `callback_url`，当消息处理完成后，API服务会向该URL发送POST请求：
+
+**成功**：
+```json
+{
+  "message_id": "原始消息ID",
+  "success": true
+}
+```
+
+**失败**：
+```json
+{
+  "message_id": "原始消息ID",
+  "success": false,
+  "error": "错误信息"
+}
+```
+
+### API 客户端使用示例
+
+#### 安装依赖
+
+```bash
+pip install requests
+```
+
+#### 发送文本消息
+
+```bash
+python api_client.py --token "您的API令牌" --umo "目标会话ID" --type text --content "这是一条测试消息"
+```
+
+#### 发送图片消息
+
+```bash
+python api_client.py --token "您的API令牌" --umo "目标会话ID" --type image --image "图片路径.jpg"
+```
+
+#### 健康检查
+
+```bash
+python api_client.py --type health
+```
+
+#### 使用回调URL
+
+```bash
+python api_client.py --token "您的API令牌" --umo "目标会话ID" --type text --content "带回调的消息" --callback "http://your-server.com/callback"
+```
 
 ## 开发者信息
 
@@ -122,6 +253,17 @@ id可以在日志中查询
 - **仓库**: https://github.com/Ayu-u/astrbot_plugin_group_sum_ai
 
 ## 更新情况
+
+### v1.1.0 (2025-05-01)
+
+1. **新增HTTP API功能**
+   - 添加HTTP API服务，支持通过API发送消息
+   - 提供健康检查接口和回调通知机制
+   - 提供完整的API客户端和使用示例
+
+2. **安全性增强**
+   - API访问需要令牌认证，防止未授权访问
+   - 首次启用API时自动生成安全令牌
 
 ### v1.0.0 (2025-04-17)
 

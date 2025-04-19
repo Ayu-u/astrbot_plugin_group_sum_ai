@@ -80,14 +80,14 @@
           "type": {
             "description": "发送目标类型",
             "type": "string",
-            "hint": "current - 当前群聊, custom - 自定义群聊",
+            "hint": "current - 当前群聊, custom - 自定义群聊, api - HTTP API",
             "default": "current",
-            "options": ["current", "custom"]
+            "options": ["current", "custom", "api"]
           },
           "custom_group_id": {
             "description": "自定义目标群ID",
             "type": "string",
-            "hint": "当type为custom时生效，可使用/get_session_id命令获取",
+            "hint": "当type为custom或api时生效，可使用/get_session_id命令获取",
             "default": ""
           },
           "add_group_name_prefix": {
@@ -95,6 +95,37 @@
             "type": "bool",
             "hint": "当发送到自定义群聊时，是否添加原群名称前缀",
             "default": true
+          }
+        }
+      },
+      "api": {
+        "description": "HTTP API发送设置",
+        "type": "object",
+        "hint": "配置通过HTTP API发送消息",
+        "items": {
+          "enabled": {
+            "description": "是否启用HTTP API发送功能",
+            "type": "bool",
+            "hint": "开启后将启动HTTP API服务器",
+            "default": false
+          },
+          "host": {
+            "description": "API服务器监听地址",
+            "type": "string",
+            "hint": "HTTP API服务器的监听地址，默认为0.0.0.0",
+            "default": "0.0.0.0"
+          },
+          "port": {
+            "description": "API服务器监听端口",
+            "type": "int",
+            "hint": "HTTP API服务器的监听端口，默认为9966",
+            "default": 9966
+          },
+          "token": {
+            "description": "API访问令牌",
+            "type": "string",
+            "hint": "访问API需要提供的令牌，留空将自动生成",
+            "default": ""
           }
         }
       }

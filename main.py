@@ -5,8 +5,15 @@ import yaml
 import glob
 import asyncio
 import traceback
+import secrets
+import uuid
+import base64
+from io import BytesIO
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
+from multiprocessing import Process, Queue
+
+import aiohttp
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api.platform import MessageType
@@ -61,6 +68,12 @@ class GroupSummarizer(Star):
                         "type": "current",
                         "custom_group_id": "",
                         "add_group_name_prefix": True
+                    },
+                    "api": {
+                        "enabled": False,
+                        "host": "0.0.0.0",
+                        "port": 9966,
+                        "token": ""
                     }
                 }
             }
@@ -84,10 +97,27 @@ class GroupSummarizer(Star):
         if self.config.get("data_cleaning", {}).get("enabled", False):
             self.clean_task = asyncio.create_task(self._periodic_clean())
         
+        # API相关配置
+        self.api_config = self.config.get("sending", {}).get("api", {})
+        self.api_enabled = self.api_config.get("enabled", False)
+        self.api_in_queue = None
+        self.api_process = None
+        self.api_running = False
+
+        # 如果启用了API，则初始化相关资源
+        if self.api_enabled:
+            # 如果没有配置令牌，则生成一个
+            if not self.api_config.get("token"):
+                self.api_config["token"] = secrets.token_urlsafe(32)
+                # 如果有save_config方法，则保存配置
+                if hasattr(self.config, "save_config"):
+                    self.config.save_config()
+        
         logger.info("群消息总结插件已初始化")
         logger.info(f"群聊总结配置: summary_threshold={self.config['summary_threshold']}, "
                    f"min_interval={self.config['min_interval']}秒, "
-                   f"send_to_chat={self.config.get('sending', {}).get('send_to_chat', False)}")
+                   f"send_to_chat={self.config.get('sending', {}).get('send_to_chat', False)}, "
+                   f"api_enabled={self.api_enabled}")
     
     def _load_state(self):
         """从文件加载状态"""
@@ -402,8 +432,36 @@ class GroupSummarizer(Star):
             target_config = self.config.get("sending", {}).get("target", {})
             target_type = target_config.get("type", "current")
             
-            # 确定发送目标
-            if target_type == "current":
+            # 根据目标类型选择发送方式
+            if target_type == "api":
+                # 通过API发送
+                if not self.api_enabled:
+                    logger.error("API发送功能未启用，无法发送总结")
+                    return
+                    
+                # 构建消息内容
+                if target_config.get("add_group_name_prefix", True):
+                    message = f"【{source_group_name} 群聊消息总结】\n\n{summary}"
+                else:
+                    message = f"【群聊消息总结】\n\n{summary}"
+                    
+                # 获取目标会话ID
+                custom_group_id = target_config.get("custom_group_id", "")
+                if not custom_group_id:
+                    logger.error("未配置API发送目标群ID，无法发送总结")
+                    return
+                    
+                # 将消息加入队列
+                message_id = str(uuid.uuid4())
+                self.api_in_queue.put({
+                    "message_id": message_id,
+                    "content": message,
+                    "umo": custom_group_id,
+                    "type": "text"
+                })
+                logger.info(f"已将消息总结通过API队列发送: {message_id}")
+                
+            elif target_type == "current":
                 # 发送到当前群聊
                 message = f"【群聊消息总结】\n\n{summary}"
                 message_chain = MessageChain().message(message)
@@ -590,7 +648,14 @@ class GroupSummarizer(Star):
 /summarize_now - 立即总结当前收集的所有消息 (仅管理员)
 /summary [数量] - 立即总结指定数量的最近消息 (仅管理员)
 /summary_debug [计数] - 设置当前群消息计数器的值用于调试自动触发功能 (仅管理员)
-/get_session_id - 获取当前会话的ID信息，用于配置白名单或自定义目标群
+/get_session_id - 获取当前会话的ID信息，用于配置白名单或自定义目标群"""
+
+        # 如果API功能已启用，添加API相关命令
+        if self.api_enabled:
+            help_text += """
+/summary_api_info - 显示API相关信息，包括访问地址和令牌 (仅管理员)"""
+            
+        help_text += """
 /summary_help - 显示本帮助信息
 
 自动总结会在消息达到阈值({threshold}条)且满足时间间隔({min_interval}秒)后触发。
@@ -682,10 +747,40 @@ class GroupSummarizer(Star):
         logger.info(f"会话ID信息: {unified_id}")
         logger.info(f"群ID: {group_id}, 发送者ID: {sender_id}, 平台: {platform}, 消息类型: {msg_type}")
     
+    @filter.command("summary_api_info")
+    @filter.permission_type(PermissionType.ADMIN)  # 仅管理员可执行
+    async def api_info(self, event: AstrMessageEvent):
+        """显示API相关信息"""
+        if not self.api_enabled:
+            yield event.plain_result("群消息总结API功能未启用，请在配置中启用")
+            return
+            
+        host = self.api_config.get("host", "0.0.0.0")
+        port = self.api_config.get("port", 9966)
+        token = self.api_config.get("token", "")
+        
+        # 如果host是0.0.0.0，显示本地IP地址可能更有用
+        display_host = "localhost" if host == "0.0.0.0" else host
+        
+        info = "群消息总结HTTP API信息:\n\n"
+        info += f"API地址: http://{display_host}:{port}\n"
+        info += f"API令牌: {token}\n\n"
+        info += "使用示例 (curl):\n"
+        info += f"curl -X POST \\\n"
+        info += f"  -H \"Authorization: Bearer {token}\" \\\n"
+        info += f"  -H \"Content-Type: application/json\" \\\n"
+        info += f"  -d '{{\"content\":\"测试消息\",\"umo\":\"目标ID\"}}' \\\n"
+        info += f"  http://{display_host}:{port}/send"
+        
+        yield event.plain_result(info)
+    
     async def terminate(self):
         """插件终止时的清理工作"""
         try:
+            # 保存状态
             self._save_state()
+            
+            # 取消现有任务
             if hasattr(self, 'save_task') and not self.save_task.done():
                 self.save_task.cancel()
                 try:
@@ -699,7 +794,190 @@ class GroupSummarizer(Star):
                     await self.clean_task
                 except asyncio.CancelledError:
                     pass
+                
+            # 关闭API服务
+            if hasattr(self, 'api_enabled') and self.api_enabled and hasattr(self, 'api_running') and self.api_running:
+                self.api_running = False
+                if hasattr(self, 'api_process') and self.api_process:
+                    self.api_process.terminate()
+                    self.api_process.join(5)
+                if hasattr(self, 'api_in_queue') and self.api_in_queue:
+                    while not self.api_in_queue.empty():
+                        try:
+                            self.api_in_queue.get(False)
+                        except:
+                            pass
+                    
         except Exception as e:
             logger.error(f"群消息总结插件终止时发生错误: {e}")
+            logger.error(f"错误详情: {traceback.format_exc()}")
         
-        logger.info("群消息总结插件已终止") 
+        logger.info("群消息总结插件已终止")
+
+    async def initialize(self):
+        """初始化插件，如果启用了API功能则启动API服务器"""
+        if self.api_enabled:
+            try:
+                from hypercorn.asyncio import serve
+                from hypercorn.config import Config
+                from quart import Quart, abort, jsonify, request
+                
+                logger.info("初始化群消息总结插件的HTTP API服务")
+                self.api_in_queue = Queue()
+                self.api_process = Process(
+                    target=self._run_api_server,
+                    args=(
+                        self.api_config.get("token"),
+                        self.api_config.get("host", "0.0.0.0"),
+                        self.api_config.get("port", 9966),
+                        self.api_in_queue,
+                    ),
+                    daemon=True,
+                )
+                self.api_process.start()
+                self.api_running = True
+                asyncio.create_task(self._process_api_messages())
+                logger.info(f"群消息总结插件的HTTP API服务已启动，地址: http://{self.api_config.get('host', '0.0.0.0')}:{self.api_config.get('port', 9966)}")
+            except ImportError:
+                logger.error("无法启动HTTP API服务：缺少必要的依赖库。请安装hypercorn和quart库。")
+                self.api_enabled = False
+                self.api_running = False
+
+    def _run_api_server(self, token, host, port, in_queue):
+        """运行API服务器（在单独的进程中）"""
+        try:
+            from hypercorn.asyncio import serve
+            from hypercorn.config import Config
+            from quart import Quart, abort, jsonify, request
+            
+            # 创建Quart应用
+            app = Quart(__name__)
+            
+            # 设置路由
+            @app.errorhandler(400)
+            async def bad_request(e):
+                return jsonify({"error": "Bad Request", "details": str(e)}), 400
+
+            @app.errorhandler(403)
+            async def forbidden(e):
+                return jsonify({"error": "Forbidden", "details": str(e)}), 403
+
+            @app.errorhandler(500)
+            async def server_error(e):
+                return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
+
+            # 发送消息接口
+            @app.route("/send", methods=["POST"])
+            async def send_endpoint():
+                auth_header = request.headers.get("Authorization")
+                if not auth_header or auth_header != f"Bearer {token}":
+                    print(f"来自 {request.remote_addr} 的无效令牌")
+                    abort(403, description="无效令牌")
+
+                data = await request.get_json()
+                if not data:
+                    abort(400, description="无效的JSON数据")
+
+                required_fields = {"content", "umo"}
+                if missing := required_fields - data.keys():
+                    abort(400, description=f"缺少必填字段: {missing}")
+
+                message = {
+                    "message_id": data.get("message_id", str(uuid.uuid4())),
+                    "content": data["content"],
+                    "umo": data["umo"],
+                    "type": data.get("type", "text"),
+                    "callback_url": data.get("callback_url"),
+                }
+
+                in_queue.put(message)
+                print(f"消息已加入队列: {message['message_id']}")
+
+                return jsonify({
+                    "status": "queued",
+                    "message_id": message["message_id"],
+                    "queue_size": in_queue.qsize(),
+                })
+
+            # 健康检查接口
+            @app.route("/health", methods=["GET"])
+            async def health_check():
+                return jsonify({
+                    "status": "ok",
+                    "queue_size": in_queue.qsize(),
+                })
+                
+            # 启动服务器
+            config = Config()
+            config.bind = [f"{host}:{port}"]
+            
+            async def run_server():
+                print(f"群消息总结API服务已启动于 {host}:{port}")
+                await serve(app, config)
+                
+            # 运行服务器
+            asyncio.run(run_server())
+            
+        except ImportError:
+            print("缺少运行HTTP API服务器所需的依赖库")
+        except Exception as e:
+            print(f"启动API服务器失败: {e}")
+            
+    async def _process_api_messages(self):
+        """处理API消息队列中的消息"""
+        while self.api_running:
+            try:
+                # 使用非阻塞方式获取消息，避免进程终止时阻塞
+                try:
+                    message = self.api_in_queue.get_nowait()
+                except Exception:
+                    # 队列为空，等待一段时间后继续
+                    await asyncio.sleep(0.5)
+                    continue
+                
+                logger.info(f"处理API消息: {message['message_id']}")
+                try:
+                    result = {"message_id": message["message_id"], "success": True}
+                    
+                    # 构建消息链
+                    if message["type"] == "image":
+                        try:
+                            # 如果是base64编码的图片内容
+                            image_data = base64.b64decode(message["content"])
+                            from PIL import Image as PILImage
+                            PILImage.open(BytesIO(image_data)).verify()  # 验证图片格式
+                            from astrbot.core.message.components import Image
+                            chain = MessageChain(chain=[Image.fromBytes(image_data)])
+                        except Exception as e:
+                            logger.error(f"图片处理失败: {e}")
+                            raise Exception(f"不支持的图片格式: {e}")
+                    else:
+                        # 文本消息
+                        from astrbot.core.message.components import Plain
+                        chain = MessageChain(chain=[Plain(message["content"])])
+                    
+                    # 发送消息
+                    await self.context.send_message(message["umo"], chain)
+                    logger.info(f"API消息已发送: {message['message_id']}")
+                    
+                except Exception as e:
+                    logger.error(f"API消息处理失败: {e}")
+                    result.update({"success": False, "error": str(e)})
+                finally:
+                    # 如果有回调URL，发送结果通知
+                    if callback_url := message.get("callback_url"):
+                        await self._send_api_callback(callback_url, result)
+            except Exception as e:
+                # 捕获所有异常，确保循环不会中断
+                logger.error(f"处理API消息队列时发生异常: {e}")
+                await asyncio.sleep(1)
+
+    async def _send_api_callback(self, url, data):
+        """发送API回调通知"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=data, timeout=5) as resp:
+                    if resp.status >= 400:
+                        logger.warning(f"API回调失败: 状态码 {resp.status}")
+        except Exception as e:
+            logger.error(f"API回调错误: {e}") 
