@@ -86,6 +86,7 @@ class GroupSummarizer(Star):
         self.message_counters = {}  # 群ID -> 消息计数
         self.message_buffers = {}   # 群ID -> 消息列表
         self.last_summary_time = {} # 群ID -> 上次总结时间
+        self.last_summarized_positions = {} # 群ID -> 上次总结的位置
         
         # 从文件加载状态
         self._load_state()
@@ -128,6 +129,7 @@ class GroupSummarizer(Star):
                     state = json.load(f)
                     self.message_counters = state.get("counters", {})
                     self.last_summary_time = state.get("last_summary_time", {})
+                    self.last_summarized_positions = state.get("last_summarized_positions", {})
                     logger.info("群消息总结状态加载成功")
         except Exception as e:
             logger.error(f"加载群消息总结状态失败: {e}")
@@ -139,6 +141,7 @@ class GroupSummarizer(Star):
             state = {
                 "counters": self.message_counters,
                 "last_summary_time": self.last_summary_time,
+                "last_summarized_positions": self.last_summarized_positions,
                 "last_update": int(time.time())
             }
             with open(state_file, "w", encoding="utf-8") as f:
@@ -228,6 +231,7 @@ class GroupSummarizer(Star):
             self.message_counters[group_id] = 0
             self.message_buffers[group_id] = []
             self.last_summary_time[group_id] = 0
+            self.last_summarized_positions[group_id] = 0
             logger.info(f"初始化群 {group_id} 的消息缓存")
         
         # 收集消息
@@ -255,11 +259,12 @@ class GroupSummarizer(Star):
         
         # 增加计数
         self.message_counters[group_id] += 1
-        
+        try:
         # 每收到10条消息记录一次日志
-        if self.message_counters[group_id] % 10 == 0:
-            logger.info(f"群 {group_id} 当前消息计数: {self.message_counters[group_id]}/{self.config['summary_threshold']}")
-        
+          # if self.message_counters[group_id] % 10 == 0:
+          logger.info(f"群 {group_id} 当前消息计数: {self.message_counters[group_id]}/{self.config['summary_threshold']}")
+        except Exception as e:
+            logger.error(f"记录日志失败: {e}")
         # 检查是否达到总结条件
         threshold = self.config["summary_threshold"]
         min_interval = self.config["min_interval"]
@@ -299,22 +304,39 @@ class GroupSummarizer(Star):
             logger.info(f"群 {group_id} 没有可总结的消息")
             return None
         
+        # 获取上次总结的位置
+        last_position = self.last_summarized_positions.get(group_id, 0)
+        
+        # 如果位置超出范围（例如消息缓冲区被清理），重置为0
+        if last_position >= len(messages):
+            last_position = 0
+            logger.info(f"群 {group_id} 上次总结位置超出范围，重置为0")
+        
+        # 只获取新消息
+        new_messages = messages[last_position:]
+        if not new_messages:
+            logger.info(f"群 {group_id} 没有新消息需要总结")
+            return None
+            
+        # 更新上次总结位置
+        self.last_summarized_positions[group_id] = len(messages)
+        
         # 获取群信息
         group = await event.get_group()
         group_name = group.group_name if group else "未知群组"
         
-        logger.info(f"开始总结群 {group_id} ({group_name}) 的 {len(messages)} 条消息")
+        logger.info(f"开始总结群 {group_id} ({group_name}) 的 {len(new_messages)} 条新消息")
         
         # 准备提示词
         current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        msg_count = len(messages)
+        msg_count = len(new_messages)
         
         # 根据配置决定使用内部还是外部提示词
         if self.config.get("use_external_prompts", True):
             # 构建消息文本
             message_texts = []
             # 最多使用最近200条消息，防止token过多
-            recent_messages = messages[-200:]
+            recent_messages = new_messages[-200:]
             for msg in recent_messages:
                 time_str = time.strftime("%H:%M", time.localtime(msg["timestamp"]))
                 message_texts.append(MESSAGE_FORMAT.format(
@@ -345,7 +367,7 @@ class GroupSummarizer(Star):
             )
             
             # 最多使用最近200条消息，防止token过多
-            recent_messages = messages[-200:]
+            recent_messages = new_messages[-200:]
             for msg in recent_messages:
                 time_str = time.strftime("%H:%M", time.localtime(msg["timestamp"]))
                 prompt += f"[{time_str}] {msg['sender_name']}: {msg['content']}\n"
@@ -536,7 +558,15 @@ class GroupSummarizer(Star):
             yield event.plain_result("当前群没有收集到消息，无法总结")
             return
         
-        yield event.plain_result(f"正在总结当前群内 {len(self.message_buffers[group_id])} 条消息...")
+        # 获取最新消息数量
+        last_position = self.last_summarized_positions.get(group_id, 0)
+        new_message_count = len(self.message_buffers[group_id]) - last_position
+        
+        if new_message_count <= 0:
+            yield event.plain_result("自上次总结以来没有新消息，无需总结")
+            return
+            
+        yield event.plain_result(f"正在总结自上次总结以来的 {new_message_count} 条新消息...")
         summary = await self.summarize_messages(group_id, event)
         
         # 重置计数
@@ -585,15 +615,18 @@ class GroupSummarizer(Star):
             
         yield event.plain_result(f"正在总结当前群内 {len(messages)} 条消息...")
         
-        # 存储原始消息缓冲区并替换为要总结的部分
+        # 存储原始消息缓冲区、上次总结位置，并替换为要总结的部分
         original_buffer = self.message_buffers.get(group_id, [])
+        original_position = self.last_summarized_positions.get(group_id, 0)
         self.message_buffers[group_id] = messages
+        self.last_summarized_positions[group_id] = 0  # 从0开始总结临时缓冲区
         
         # 进行总结
         summary = await self.summarize_messages(group_id, event)
         
-        # 恢复原始消息缓冲区
+        # 恢复原始消息缓冲区和上次总结位置
         self.message_buffers[group_id] = original_buffer
+        self.last_summarized_positions[group_id] = original_position
         
         # 不重置计数器，只保存当前时间
         self.last_summary_time[group_id] = int(time.time())
@@ -616,12 +649,20 @@ class GroupSummarizer(Star):
         threshold = self.config["summary_threshold"]
         last_time = self.last_summary_time.get(group_id, 0)
         
+        # 获取新消息数量
+        total_messages = len(self.message_buffers.get(group_id, []))
+        last_position = self.last_summarized_positions.get(group_id, 0)
+        new_messages = total_messages - last_position
+        
         if last_time > 0:
             last_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_time))
         else:
             last_time_str = "从未总结"
             
-        status = f"当前群消息总结状态:\n已收集消息数: {count}/{threshold}\n上次总结时间: {last_time_str}"
+        status = f"当前群消息总结状态:\n"
+        status += f"已收集消息数: {count}/{threshold}\n"
+        status += f"自上次总结以来新消息: {new_messages} 条\n"
+        status += f"上次总结时间: {last_time_str}"
         
         # 添加发送设置信息
         sending_config = self.config.get("sending", {})
