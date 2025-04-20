@@ -271,13 +271,23 @@ class GroupSummarizer(Star):
             self.message_buffers[group_id] = self.message_buffers[group_id][-max_size:]
             logger.debug(f"群 {group_id} (完整ID: {full_session_id}) 缓冲区清理完成，当前大小: {len(self.message_buffers[group_id])}")
         
+        # 获取群名称
+        group = None
+        group_name = "未知群组"
+        try:
+            group = await event.get_group()
+            if group:
+                group_name = group.group_name
+        except Exception as e:
+            logger.warning(f"获取群 {group_id} 名称失败: {e}")
+        
         # 增加计数
         self.message_counters[group_id] += 1
-        logger.info(f"群 {group_id} (完整ID: {full_session_id}) 当前消息计数: {self.message_counters[group_id]}/{self.config['summary_threshold']}, 缓冲区大小: {buffer_size}")
+        logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 当前消息计数: {self.message_counters[group_id]}/{self.config['summary_threshold']}, 缓冲区大小: {buffer_size}")
         
         # 如果该群正在进行总结，跳过总结检查
         if group_id in self.summarizing_groups:
-            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 正在进行总结，跳过本次总结检查")
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 正在进行总结，跳过本次总结检查")
             return
             
         # 检查是否达到总结条件
@@ -289,44 +299,44 @@ class GroupSummarizer(Star):
         
         # 记录触发条件的判断过程
         if self.message_counters[group_id] >= threshold:
-            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 消息数量已达到阈值: {self.message_counters[group_id]}/{threshold}")
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 消息数量已达到阈值: {self.message_counters[group_id]}/{threshold}")
             if time_diff >= min_interval or last_time == 0:
-                logger.info(f"群 {group_id} (完整ID: {full_session_id}) 时间间隔满足条件: 距上次总结 {time_diff} 秒 >= {min_interval} 秒或从未总结")
-                logger.info(f"群 {group_id} (完整ID: {full_session_id}) 触发自动总结")
+                logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 时间间隔满足条件: 距上次总结 {time_diff} 秒 >= {min_interval} 秒或从未总结")
+                logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 触发自动总结")
                 
                 # 标记该群正在进行总结
                 self.summarizing_groups.add(group_id)
-                logger.info(f"已将群 {group_id} (完整ID: {full_session_id}) 标记为正在总结状态")
+                logger.info(f"已将群 {group_id} (完整ID: {full_session_id}) ({group_name}) 标记为正在总结状态")
                 
                 try:
                     # 符合总结条件，进行总结
-                    logger.info(f"开始为群 {group_id} (完整ID: {full_session_id}) 执行总结")
+                    logger.info(f"开始为群 {group_id} (完整ID: {full_session_id}) ({group_name}) 执行总结")
                     summary = await self.summarize_messages(group_id, event)
                     
                     # 重置计数
                     old_count = self.message_counters[group_id]
                     self.message_counters[group_id] = 0
-                    logger.info(f"群 {group_id} (完整ID: {full_session_id}) 消息计数已重置: {old_count} -> 0")
+                    logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 消息计数已重置: {old_count} -> 0")
                     
                     # 更新总结时间
                     old_time = self.last_summary_time[group_id]
                     self.last_summary_time[group_id] = current_time
-                    logger.info(f"群 {group_id} (完整ID: {full_session_id}) 上次总结时间已更新: {old_time} -> {current_time}")
+                    logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 上次总结时间已更新: {old_time} -> {current_time}")
                     
                     # 保存状态
-                    logger.info(f"保存群 {group_id} (完整ID: {full_session_id}) 的状态")
+                    logger.info(f"保存群 {group_id} (完整ID: {full_session_id}) ({group_name}) 的状态")
                     self._save_state()
                     
                     if summary:
-                        logger.info(f"群 {group_id} (完整ID: {full_session_id}) 总结成功完成，总结内容长度: {len(summary)}")
+                        logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 总结成功完成，总结内容长度: {len(summary)}")
                     else:
-                        logger.warning(f"群 {group_id} (完整ID: {full_session_id}) 总结操作未返回有效内容")
+                        logger.warning(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 总结操作未返回有效内容")
                 finally:
                     # 无论总结是否成功，都移除标记
                     self.summarizing_groups.discard(group_id)
-                    logger.info(f"已移除群 {group_id} (完整ID: {full_session_id}) 的正在总结标记")
+                    logger.info(f"已移除群 {group_id} (完整ID: {full_session_id}) ({group_name}) 的正在总结标记")
             else:
-                logger.info(f"群 {group_id} (完整ID: {full_session_id}) 时间间隔不满足条件: 距上次总结 {time_diff} 秒 < {min_interval} 秒")
+                logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 时间间隔不满足条件: 距上次总结 {time_diff} 秒 < {min_interval} 秒")
     
     async def summarize_messages(self, group_id: str, event: AstrMessageEvent) -> Optional[str]:
         """总结群消息
