@@ -18,18 +18,6 @@
     "hint": "即使达到消息阈值，也需要满足最小间隔才会触发总结",
     "default": 3600
   },
-  "summary_system_prompt": {
-    "description": "提供给LLM的系统提示词，指导总结风格",
-    "type": "string",
-    "hint": "指导大模型如何进行总结的系统提示词",
-    "default": "你是一个专业的群聊分析师，善于提取群聊中的关键信息和主要话题。"
-  },
-  "use_external_prompts": {
-    "description": "是否使用外部提示词文件",
-    "type": "bool",
-    "hint": "如果启用，将从prompts.py加载提示词模板",
-    "default": true
-  },
   "data_cleaning": {
     "description": "旧总结文件清理设置",
     "type": "object",
@@ -87,7 +75,7 @@
           "custom_group_id": {
             "description": "自定义目标群ID",
             "type": "string",
-            "hint": "当type为custom或api时生效，可使用/get_session_id命令获取",
+            "hint": "当type为custom或api时生效，必须使用完整格式的会话ID (例如: gewechat:GroupMessage:12345678@chatroom)，可使用/get_session_id命令获取",
             "default": ""
           },
           "add_group_name_prefix": {

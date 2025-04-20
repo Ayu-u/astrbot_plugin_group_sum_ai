@@ -1,5 +1,5 @@
 name: astrbot_plugin_group_sum_ai
 desc: 自动收集群聊消息并每（可配置）条进行一次总结，或者立即总结，总结结果保存到本地，并且可以发送到当前聊天界面或者指定聊天窗口
 author: Ayu-u
-version: 1.0.0
+version: 2.1.2
 repo: https://github.com/Ayu-u/astrbot_plugin_group_sum_ai

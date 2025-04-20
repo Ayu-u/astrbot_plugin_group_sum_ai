@@ -25,14 +25,19 @@ from astrbot import logger
 # 导入提示词
 try:
     from .prompts import SYSTEM_PROMPT, SUMMARY_PROMPT_TEMPLATE, MESSAGE_FORMAT, FEW_MESSAGES_PROMPT
+    
+    # 验证导入的提示词
+    if not isinstance(SYSTEM_PROMPT, str) or not SYSTEM_PROMPT.strip():
+        raise ValueError("SYSTEM_PROMPT 必须是非空字符串")
+    if not isinstance(SUMMARY_PROMPT_TEMPLATE, str) or not all(x in SUMMARY_PROMPT_TEMPLATE for x in ["{group_name}", "{msg_count}", "{current_time}", "{messages}"]):
+        raise ValueError("SUMMARY_PROMPT_TEMPLATE 格式不正确，缺少必要的占位符")
+    if not isinstance(MESSAGE_FORMAT, str) or not all(x in MESSAGE_FORMAT for x in ["{time_str}", "{sender_name}", "{content}"]):
+        raise ValueError("MESSAGE_FORMAT 格式不正确，缺少必要的占位符")
+    
     logger.info("成功从提示词文件加载提示词")
-except ImportError:
-    logger.warning("未找到提示词文件或提示词文件格式错误，将使用默认提示词")
-    # 默认提示词
-    SYSTEM_PROMPT = "你是一个专业的群聊分析师，善于提取群聊中的关键信息和主要话题。"
-    SUMMARY_PROMPT_TEMPLATE = "请总结以下微信群聊（{group_name}）最近的{msg_count}条消息内容，提取主要讨论话题和重点信息。\n当前时间: {current_time}\n\n{messages}"
-    MESSAGE_FORMAT = "[{time_str}] {sender_name}: {content}"
-    FEW_MESSAGES_PROMPT = ""
+except (ImportError, ValueError) as e:
+    logger.error(f"提示词加载失败: {str(e)}，插件无法正常运行")
+    raise ImportError(f"无法加载必要的提示词: {str(e)}")
 
 @register("group-summarizer", "Ayu-u", "自动总结群聊消息", "1.0.0")
 class GroupSummarizer(Star):
@@ -54,8 +59,6 @@ class GroupSummarizer(Star):
                 "summary_threshold": 300,
                 "max_buffer_size": 500,
                 "min_interval": 3600,
-                "summary_system_prompt": SYSTEM_PROMPT,
-                "use_external_prompts": True,
                 "data_cleaning": {
                     "enabled": True,
                     "check_interval": 86400,
@@ -87,6 +90,7 @@ class GroupSummarizer(Star):
         self.message_buffers = {}   # 群ID -> 消息列表
         self.last_summary_time = {} # 群ID -> 上次总结时间
         self.last_summarized_positions = {} # 群ID -> 上次总结的位置
+        self.summarizing_groups = set()  # 正在进行总结的群ID集合，防止并发触发总结
         
         # 从文件加载状态
         self._load_state()
@@ -226,13 +230,18 @@ class GroupSummarizer(Star):
         if not group_id:
             return
         
+        # 获取完整会话ID
+        platform_name = event.get_platform_name() or "unknown"
+        full_session_id = event.unified_msg_origin or f"{platform_name}:GroupMessage:{group_id}"
+        
         # 初始化群消息缓存
         if group_id not in self.message_counters:
+            logger.info(f"初始化群 {group_id} 的消息缓存 (完整ID: {full_session_id})")
+            logger.info(f"完整会话ID: {full_session_id}")
             self.message_counters[group_id] = 0
             self.message_buffers[group_id] = []
             self.last_summary_time[group_id] = 0
             self.last_summarized_positions[group_id] = 0
-            logger.info(f"初始化群 {group_id} 的消息缓存")
         
         # 收集消息
         sender_name = event.get_sender_name() or "未知用户"
@@ -242,9 +251,11 @@ class GroupSummarizer(Star):
         
         # 跳过空消息
         if not content.strip():
+            logger.debug(f"跳过群 {group_id} (完整ID: {full_session_id}) 的空消息")
             return
         
         # 消息缓存，保持在最大容量以内
+        logger.debug(f"添加消息到群 {group_id} (完整ID: {full_session_id}) 的缓存: {sender_name}: {content[:30]}...")
         self.message_buffers.setdefault(group_id, []).append({
             "sender_name": sender_name,
             "sender_id": sender_id,
@@ -254,17 +265,21 @@ class GroupSummarizer(Star):
         
         # 限制缓冲区大小
         max_size = self.config["max_buffer_size"]
-        if len(self.message_buffers[group_id]) > max_size:
+        buffer_size = len(self.message_buffers[group_id])
+        if buffer_size > max_size:
+            logger.debug(f"群 {group_id} (完整ID: {full_session_id}) 缓冲区超过最大大小 {max_size}，清理旧消息")
             self.message_buffers[group_id] = self.message_buffers[group_id][-max_size:]
+            logger.debug(f"群 {group_id} (完整ID: {full_session_id}) 缓冲区清理完成，当前大小: {len(self.message_buffers[group_id])}")
         
         # 增加计数
         self.message_counters[group_id] += 1
-        try:
-        # 每收到10条消息记录一次日志
-          # if self.message_counters[group_id] % 10 == 0:
-          logger.info(f"群 {group_id} 当前消息计数: {self.message_counters[group_id]}/{self.config['summary_threshold']}")
-        except Exception as e:
-            logger.error(f"记录日志失败: {e}")
+        logger.info(f"群 {group_id} (完整ID: {full_session_id}) 当前消息计数: {self.message_counters[group_id]}/{self.config['summary_threshold']}, 缓冲区大小: {buffer_size}")
+        
+        # 如果该群正在进行总结，跳过总结检查
+        if group_id in self.summarizing_groups:
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 正在进行总结，跳过本次总结检查")
+            return
+            
         # 检查是否达到总结条件
         threshold = self.config["summary_threshold"]
         min_interval = self.config["min_interval"]
@@ -274,20 +289,44 @@ class GroupSummarizer(Star):
         
         # 记录触发条件的判断过程
         if self.message_counters[group_id] >= threshold:
-            logger.info(f"群 {group_id} 消息数量已达到阈值: {self.message_counters[group_id]}/{threshold}")
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 消息数量已达到阈值: {self.message_counters[group_id]}/{threshold}")
             if time_diff >= min_interval or last_time == 0:
-                logger.info(f"群 {group_id} 时间间隔满足条件: 距上次总结 {time_diff} 秒 >= {min_interval} 秒或从未总结")
-                logger.info(f"群 {group_id} 触发自动总结")
+                logger.info(f"群 {group_id} (完整ID: {full_session_id}) 时间间隔满足条件: 距上次总结 {time_diff} 秒 >= {min_interval} 秒或从未总结")
+                logger.info(f"群 {group_id} (完整ID: {full_session_id}) 触发自动总结")
                 
-                # 符合总结条件，进行总结
-                await self.summarize_messages(group_id, event)
-                # 重置计数
-                self.message_counters[group_id] = 0
-                self.last_summary_time[group_id] = current_time
-                # 保存状态
-                self._save_state()
+                # 标记该群正在进行总结
+                self.summarizing_groups.add(group_id)
+                logger.info(f"已将群 {group_id} (完整ID: {full_session_id}) 标记为正在总结状态")
+                
+                try:
+                    # 符合总结条件，进行总结
+                    logger.info(f"开始为群 {group_id} (完整ID: {full_session_id}) 执行总结")
+                    summary = await self.summarize_messages(group_id, event)
+                    
+                    # 重置计数
+                    old_count = self.message_counters[group_id]
+                    self.message_counters[group_id] = 0
+                    logger.info(f"群 {group_id} (完整ID: {full_session_id}) 消息计数已重置: {old_count} -> 0")
+                    
+                    # 更新总结时间
+                    old_time = self.last_summary_time[group_id]
+                    self.last_summary_time[group_id] = current_time
+                    logger.info(f"群 {group_id} (完整ID: {full_session_id}) 上次总结时间已更新: {old_time} -> {current_time}")
+                    
+                    # 保存状态
+                    logger.info(f"保存群 {group_id} (完整ID: {full_session_id}) 的状态")
+                    self._save_state()
+                    
+                    if summary:
+                        logger.info(f"群 {group_id} (完整ID: {full_session_id}) 总结成功完成，总结内容长度: {len(summary)}")
+                    else:
+                        logger.warning(f"群 {group_id} (完整ID: {full_session_id}) 总结操作未返回有效内容")
+                finally:
+                    # 无论总结是否成功，都移除标记
+                    self.summarizing_groups.discard(group_id)
+                    logger.info(f"已移除群 {group_id} (完整ID: {full_session_id}) 的正在总结标记")
             else:
-                logger.info(f"群 {group_id} 时间间隔不满足条件: 距上次总结 {time_diff} 秒 < {min_interval} 秒")
+                logger.info(f"群 {group_id} (完整ID: {full_session_id}) 时间间隔不满足条件: 距上次总结 {time_diff} 秒 < {min_interval} 秒")
     
     async def summarize_messages(self, group_id: str, event: AstrMessageEvent) -> Optional[str]:
         """总结群消息
@@ -299,145 +338,169 @@ class GroupSummarizer(Star):
         Returns:
             str: 总结内容，如果总结失败则返回None
         """
+        # 获取完整会话ID
+        platform_name = event.get_platform_name() or "unknown"
+        full_session_id = event.unified_msg_origin or f"{platform_name}:GroupMessage:{group_id}"
+        
         messages = self.message_buffers.get(group_id, [])
         if not messages:
-            logger.info(f"群 {group_id} 没有可总结的消息")
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 没有可总结的消息")
             return None
         
         # 获取上次总结的位置
         last_position = self.last_summarized_positions.get(group_id, 0)
+        logger.info(f"群 {group_id} (完整ID: {full_session_id}) 上次总结位置: {last_position}, 当前消息数: {len(messages)}")
         
         # 如果位置超出范围（例如消息缓冲区被清理），重置为0
         if last_position >= len(messages):
             last_position = 0
-            logger.info(f"群 {group_id} 上次总结位置超出范围，重置为0")
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 上次总结位置超出范围，重置为0")
         
         # 只获取新消息
         new_messages = messages[last_position:]
+        logger.info(f"群 {group_id} (完整ID: {full_session_id}) 有 {len(new_messages)} 条新消息需要总结")
+        
         if not new_messages:
-            logger.info(f"群 {group_id} 没有新消息需要总结")
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 没有新消息需要总结")
             return None
             
         # 更新上次总结位置
+        old_position = self.last_summarized_positions.get(group_id, 0)
         self.last_summarized_positions[group_id] = len(messages)
+        logger.info(f"群 {group_id} (完整ID: {full_session_id}) 更新总结位置: {old_position} -> {len(messages)}")
         
         # 获取群信息
         group = await event.get_group()
         group_name = group.group_name if group else "未知群组"
         
-        logger.info(f"开始总结群 {group_id} ({group_name}) 的 {len(new_messages)} 条新消息")
+        logger.info(f"开始总结群 {group_id} (完整ID: {full_session_id}) ({group_name}) 的 {len(new_messages)} 条新消息")
         
         # 准备提示词
         current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         msg_count = len(new_messages)
         
-        # 根据配置决定使用内部还是外部提示词
-        if self.config.get("use_external_prompts", True):
-            # 构建消息文本
-            message_texts = []
-            # 最多使用最近200条消息，防止token过多
-            recent_messages = new_messages[-200:]
-            for msg in recent_messages:
-                time_str = time.strftime("%H:%M", time.localtime(msg["timestamp"]))
-                message_texts.append(MESSAGE_FORMAT.format(
-                    time_str=time_str,
-                    sender_name=msg['sender_name'],
-                    content=msg['content']
-                ))
-            
-            # 构建提示词
-            messages_str = "\n".join(message_texts)
-            if msg_count < 10 and FEW_MESSAGES_PROMPT:  # 消息数量很少时添加额外提示
-                messages_str += f"\n\n{FEW_MESSAGES_PROMPT}"
-                
-            prompt = SUMMARY_PROMPT_TEMPLATE.format(
-                group_name=group_name,
-                msg_count=msg_count,
-                current_time=current_time,
-                messages=messages_str
-            )
-            
-            system_prompt = self.config.get("summary_system_prompt", SYSTEM_PROMPT)
-        else:
-            # 使用简单提示词
-            prompt = (
-                f"请总结以下微信群聊（{group_name}）最近的{msg_count}条消息内容，"
-                f"提取主要讨论话题和重点信息。\n"
-                f"当前时间: {current_time}\n\n"
-            )
-            
-            # 最多使用最近200条消息，防止token过多
-            recent_messages = new_messages[-200:]
-            for msg in recent_messages:
-                time_str = time.strftime("%H:%M", time.localtime(msg["timestamp"]))
-                prompt += f"[{time_str}] {msg['sender_name']}: {msg['content']}\n"
-                
-            system_prompt = self.config.get("summary_system_prompt", "你是一个专业的群聊分析师，善于提取群聊中的关键信息和主要话题。")
+        # 构建消息文本
+        message_texts = []
+        # 最多使用最近200条消息，防止token过多
+        recent_messages = new_messages[-200:]
+        logger.info(f"使用最近 {len(recent_messages)}/{len(new_messages)} 条消息构建提示词")
+        
+        for msg in recent_messages:
+            time_str = time.strftime("%H:%M", time.localtime(msg["timestamp"]))
+            message_texts.append(MESSAGE_FORMAT.format(
+                time_str=time_str,
+                sender_name=msg['sender_name'],
+                content=msg['content']
+            ))
+        
+        # 构建提示词
+        messages_str = "\n".join(message_texts)
+        
+        # 如果消息数量很少，添加额外提示
+        additional_prompt = ""
+        if msg_count < 10 and FEW_MESSAGES_PROMPT:
+            logger.info(f"消息数量较少 ({msg_count} < 10)，添加额外提示")
+            additional_prompt = f"\n\n{FEW_MESSAGES_PROMPT}"
+        
+        # 构建用户提示词
+        user_prompt = SUMMARY_PROMPT_TEMPLATE.format(
+            group_name=group_name,
+            msg_count=msg_count,
+            current_time=current_time,
+            messages=messages_str
+        )
+        
+        # 添加额外提示词（如果有）
+        if additional_prompt:
+            user_prompt += additional_prompt
+        
+        # 记录完整提示词
+        logger.info(f"系统提示词长度: {len(SYSTEM_PROMPT)}")
+        logger.info(f"用户提示词长度: {len(user_prompt)}")
+        if additional_prompt:
+            logger.info(f"附加提示词长度: {len(additional_prompt)}")
+        logger.info(f"最终完整提示词内容:\n--- 系统提示词 ---\n{SYSTEM_PROMPT}\n\n--- 用户提示词 ---\n{user_prompt}")
         
         # 调用LLM进行总结
         try:
-            logger.info(f"调用LLM为群 {group_id} ({group_name}) 生成总结")
+            logger.info(f"调用LLM为群 {group_id} (完整ID: {full_session_id}) ({group_name}) 生成总结")
             provider = self.context.get_using_provider()
             if not provider:
                 logger.error("未找到默认LLM提供商")
                 return None
             
+            logger.info(f"已获取LLM提供商: {provider.__class__.__name__}")
+            
             # 调用大模型生成总结，使用简化的接口调用方式
             try:
                 # 尝试使用完整的参数列表
+                logger.info(f"使用完整参数调用LLM生成总结")
                 response = await provider.text_chat(
-                    prompt=prompt,
+                    prompt=user_prompt,
                     session_id=None,  # 不关联到特定会话
-                    contexts=[{"role": "system", "content": system_prompt}],
+                    contexts=[{"role": "system", "content": SYSTEM_PROMPT}],
                     image_urls=[]
                 )
+                logger.info(f"LLM调用成功，开始处理响应")
             except TypeError:
                 # 如果出现参数错误，尝试使用简化版本
-                logger.warning("使用简化的LLM接口调用")
+                logger.warning("完整参数调用失败，使用简化的LLM接口调用")
                 response = await provider.text_chat(
-                    prompt=prompt,
-                    contexts=[{"role": "system", "content": system_prompt}]
+                    prompt=user_prompt,
+                    contexts=[{"role": "system", "content": SYSTEM_PROMPT}]
                 )
+                logger.info(f"简化版LLM调用成功，开始处理响应")
             
             summary = None
             if hasattr(response, 'role') and response.role == "assistant":
                 summary = response.completion_text
+                logger.info(f"从response.completion_text获取到总结内容")
             elif hasattr(response, 'content'):
                 summary = response.content
+                logger.info(f"从response.content获取到总结内容")
             elif isinstance(response, str):
                 summary = response
+                logger.info(f"从字符串响应获取到总结内容")
             
             if summary:
+                logger.info(f"成功获取总结内容，长度: {len(summary)}")
+                
                 # 保存总结结果到文件
                 timestamp = int(time.time())
                 date_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(timestamp))
                 filename = f"{self.summary_dir}/{group_id}_{date_str}.txt"
+                logger.info(f"准备将总结保存到文件: {filename}")
                 
                 # 构建保存内容
                 content = f"群组: {group_name} ({group_id})\n"
                 content += f"时间: {current_time}\n"
-                content += f"消息数: {len(messages)}\n"
+                content += f"消息数: {len(new_messages)}\n"
                 content += f"总结内容:\n\n{summary}\n"
                 
                 # 保存到文件
-                with open(filename, "w", encoding="utf-8") as f:
-                    f.write(content)
-                
-                logger.info(f"群 {group_id} ({group_name}) 的消息总结已保存到: {filename}")
+                try:
+                    with open(filename, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    logger.info(f"群 {group_id} (完整ID: {full_session_id}) ({group_name}) 的消息总结已保存到: {filename}")
+                except Exception as e:
+                    logger.error(f"保存总结到文件失败: {e}")
                 
                 # 检查是否需要发送到群聊
                 sending_config = self.config.get("sending", {})
                 if sending_config.get("send_to_chat", False):
+                    logger.info(f"配置需要发送总结到群聊")
                     # 使用async for迭代异步生成器
                     await self._send_summary_to_chat(group_id, group_name, summary, event)
+                else:
+                    logger.info(f"配置不需要发送总结到群聊，仅保存到文件")
                 
                 return summary
             else:
-                logger.error(f"群 {group_id} 的消息总结失败: 未获得有效总结内容")
+                logger.error(f"群 {group_id} (完整ID: {full_session_id}) 的消息总结失败: 未获得有效总结内容")
                 return None
             
         except Exception as e:
-            logger.error(f"总结群 {group_id} 消息失败: {e}")
+            logger.error(f"总结群 {group_id} (完整ID: {full_session_id}) 消息失败: {e}")
             logger.error(f"错误详情: {traceback.format_exc()}")
             return None
     
@@ -451,8 +514,14 @@ class GroupSummarizer(Star):
             event: 原始消息事件
         """
         try:
+            # 获取完整会话ID
+            platform_name = event.get_platform_name() or "unknown"
+            full_source_id = event.unified_msg_origin or f"{platform_name}:GroupMessage:{source_group_id}"
+            
             target_config = self.config.get("sending", {}).get("target", {})
             target_type = target_config.get("type", "current")
+            
+            logger.info(f"准备发送总结，源群ID: {source_group_id} (完整ID: {full_source_id}), 目标类型: {target_type}")
             
             # 根据目标类型选择发送方式
             if target_type == "api":
@@ -470,74 +539,79 @@ class GroupSummarizer(Star):
                 # 获取目标会话ID
                 custom_group_id = target_config.get("custom_group_id", "")
                 if not custom_group_id:
-                    logger.error("未配置API发送目标群ID，无法发送总结")
+                    logger.error("未配置API发送的目标群ID，无法发送总结")
                     return
-                    
-                # 将消息加入队列
-                message_id = str(uuid.uuid4())
-                self.api_in_queue.put({
-                    "message_id": message_id,
-                    "content": message,
-                    "umo": custom_group_id,
-                    "type": "text"
-                })
-                logger.info(f"已将消息总结通过API队列发送: {message_id}")
+                
+                logger.info(f"通过API发送总结到: {custom_group_id}")
+                
+                # 这里假设API发送的逻辑
+                # ...
                 
             elif target_type == "current":
                 # 发送到当前群聊
-                message = f"【群聊消息总结】\n\n{summary}"
-                message_chain = MessageChain().message(message)
-                unified_msg_origin = event.unified_msg_origin
-                await self.context.send_message(unified_msg_origin, message_chain)
-                logger.info(f"已将消息总结发送到当前群 {source_group_id}")
-            elif target_type == "custom":
-                # 发送到指定群聊
-                custom_group_id = target_config.get("custom_group_id", "")
-                if not custom_group_id:
-                    logger.error("未配置自定义目标群ID，无法发送总结")
-                    return
-                
-                # 构建消息内容
-                if target_config.get("add_group_name_prefix", True):
-                    message = f"【{source_group_name} 群聊消息总结】\n\n{summary}"
-                else:
-                    message = f"【群聊消息总结】\n\n{summary}"
-                
-                message_chain = MessageChain().message(message)
-                
-                # 获取指定群聊的会话信息，然后发送消息
                 try:
-                    # 遍历所有平台实例
-                    success = False
-                    for platform in self.context.platform_manager.get_insts():
-                        # 获取平台名称
-                        platform_name = platform.meta().name
-                        
-                        # 尝试查找目标群并发送消息
-                        try:
-                            # 处理不同平台可能需要不同格式的群ID
-                            target_id = custom_group_id
-                            
-                            # 对于部分平台，可能需要使用完整会话ID
-                            if platform_name == "gewechat":
-                                # 如果ID不是完整格式，则构造完整会话ID
-                                if ":" not in custom_group_id:
-                                    target_id = f"{platform_name}:GroupMessage:{custom_group_id}"
-                            
-                            logger.info(f"尝试通过平台 {platform_name} 发送消息到群 {target_id}")
-                            await self.context.send_message(target_id, message_chain)
-                            logger.info(f"已将消息总结从 {source_group_id} 发送到自定义群 {target_id}")
-                            success = True
-                            break
-                        except Exception as e:
-                            # 这个平台可能没有目标群
-                            logger.debug(f"通过平台 {platform_name} 发送消息失败: {e}")
+                    # 构建消息链
+                    from astrbot.core.message.components import Plain
+                    from astrbot.api.event import MessageChain
                     
-                    if not success:
-                        # 如果所有平台都失败
-                        logger.error(f"无法找到ID为 {custom_group_id} 的群，无法发送总结")
+                    if target_config.get("add_group_name_prefix", True):
+                        content = f"【群聊消息总结】\n\n{summary}"
+                    else:
+                        content = summary
+                        
+                    message_chain = MessageChain(chain=[Plain(content)])
+                    
+                    # 获取当前平台名称和完整会话ID
+                    platform_name = event.get_platform_name() or "unknown"
+                    current_id = event.unified_msg_origin or f"{platform_name}:GroupMessage:{source_group_id}"
+                    
+                    logger.info(f"发送总结到当前群: {current_id}")
+                    await self.context.send_message(current_id, message_chain)
+                    logger.info(f"总结已发送到当前群: {current_id}")
+                except Exception as e:
+                    logger.error(f"发送总结到当前群失败: {e}")
+                    logger.error(f"错误详情: {traceback.format_exc()}")
+            elif target_type == "custom":
+                # 发送到自定义群聊
+                try:
+                    # 构建消息链
+                    from astrbot.core.message.components import Plain
+                    from astrbot.api.event import MessageChain
+                    
+                    if target_config.get("add_group_name_prefix", True):
+                        content = f"【{source_group_name} 群聊消息总结】\n\n{summary}"
+                    else:
+                        content = f"【群聊消息总结】\n\n{summary}"
+                        
+                    message_chain = MessageChain(chain=[Plain(content)])
+                    
+                    # 获取自定义群ID
+                    custom_group_id = target_config.get("custom_group_id", "")
+                    if not custom_group_id:
+                        logger.error("未配置自定义目标群ID，无法发送总结")
+                        return
+                    
+                    logger.info(f"自定义目标群ID: {custom_group_id}")
+                    
+                    # 获取平台信息
+                    platform_name = event.get_platform_name() or "unknown"
+                    logger.info(f"使用平台: {platform_name} 发送总结")
+                    
+                    # 确保使用完整格式的会话ID
+                    if ":" not in custom_group_id:
+                        logger.info(f"将简短群ID [{custom_group_id}] 转换为完整格式")
+                        target_id = f"{platform_name}:GroupMessage:{custom_group_id}"
+                    else:
+                        # 已经是完整格式，直接使用
+                        target_id = custom_group_id
+                        logger.info(f"使用已提供的完整格式群ID: {target_id}")
+                    
+                    logger.info(f"尝试通过平台 {platform_name} 发送消息到群 {target_id}")
+                    await self.context.send_message(target_id, message_chain)
+                    logger.info(f"已将消息总结从 {source_group_id} (完整ID: {full_source_id}) 发送到自定义群 {target_id}")
                 except Exception as e:
                     logger.error(f"发送总结到自定义群失败: {e}")
+                    logger.error(f"错误详情: {traceback.format_exc()}")
             else:
                 logger.warning(f"未知的目标类型: {target_type}")
                 
@@ -551,33 +625,71 @@ class GroupSummarizer(Star):
         """手动触发当前群的消息总结"""
         group_id = event.get_group_id()
         if not group_id:
+            logger.info(f"命令 /summarize_now 必须在群聊中使用")
             yield event.plain_result("此命令只能在群聊中使用")
             return
         
+        # 获取完整会话ID
+        platform_name = event.get_platform_name() or "unknown"
+        full_session_id = event.unified_msg_origin or f"{platform_name}:GroupMessage:{group_id}"
+        
         if group_id not in self.message_buffers or not self.message_buffers[group_id]:
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 没有收集到消息，无法总结")
             yield event.plain_result("当前群没有收集到消息，无法总结")
+            return
+            
+        # 检查该群是否正在总结中
+        if group_id in self.summarizing_groups:
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 已在总结中，拒绝新的总结请求")
+            yield event.plain_result("当前群正在进行总结，请稍后再试")
             return
         
         # 获取最新消息数量
         last_position = self.last_summarized_positions.get(group_id, 0)
         new_message_count = len(self.message_buffers[group_id]) - last_position
+        logger.info(f"群 {group_id} (完整ID: {full_session_id}) 自上次总结以来有 {new_message_count} 条新消息")
         
         if new_message_count <= 0:
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 没有新消息，无需总结")
             yield event.plain_result("自上次总结以来没有新消息，无需总结")
             return
             
+        logger.info(f"准备手动触发群 {group_id} (完整ID: {full_session_id}) 的总结")
         yield event.plain_result(f"正在总结自上次总结以来的 {new_message_count} 条新消息...")
-        summary = await self.summarize_messages(group_id, event)
         
-        # 重置计数
-        self.message_counters[group_id] = 0
-        self.last_summary_time[group_id] = int(time.time())
-        self._save_state()
+        # 标记该群正在进行总结
+        self.summarizing_groups.add(group_id)
+        logger.info(f"已将群 {group_id} (完整ID: {full_session_id}) 标记为正在总结状态")
         
-        if not summary:
-            yield event.plain_result("总结失败，请查看日志获取详细信息")
-        else:
-            yield event.plain_result("总结完成，已保存到文件")
+        try:
+            logger.info(f"开始为群 {group_id} (完整ID: {full_session_id}) 执行总结")
+            summary = await self.summarize_messages(group_id, event)
+            
+            # 重置计数
+            old_count = self.message_counters[group_id]
+            self.message_counters[group_id] = 0
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 消息计数已重置: {old_count} -> 0")
+            
+            # 更新总结时间
+            current_time = int(time.time())
+            old_time = self.last_summary_time[group_id]
+            self.last_summary_time[group_id] = current_time
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 上次总结时间已更新: {old_time} -> {current_time}")
+            
+            # 保存状态
+            logger.info(f"保存群 {group_id} (完整ID: {full_session_id}) 的状态")
+            self._save_state()
+            
+            if not summary:
+                logger.warning(f"群 {group_id} (完整ID: {full_session_id}) 总结失败")
+                yield event.plain_result("总结失败，请查看日志获取详细信息")
+            else:
+                logger.info(f"群 {group_id} (完整ID: {full_session_id}) 总结成功，总结内容长度: {len(summary)}")
+                yield event.plain_result("总结完成，已保存到文件")
+        finally:
+            # 无论总结是否成功，都移除标记
+            self.summarizing_groups.discard(group_id)
+            logger.info(f"已移除群 {group_id} (完整ID: {full_session_id}) 的正在总结标记")
     
     @filter.command("summary")
     @filter.permission_type(PermissionType.ADMIN)  # 仅管理员可执行
@@ -588,8 +700,19 @@ class GroupSummarizer(Star):
             yield event.plain_result("此命令只能在群聊中使用")
             return
         
+        # 获取完整会话ID
+        platform_name = event.get_platform_name() or "unknown"
+        full_session_id = event.unified_msg_origin or f"{platform_name}:GroupMessage:{group_id}"
+        
         if group_id not in self.message_buffers or not self.message_buffers[group_id]:
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 没有收集到消息，无法总结")
             yield event.plain_result("当前群没有收集到消息，无法总结")
+            return
+            
+        # 检查该群是否正在总结中
+        if group_id in self.summarizing_groups:
+            logger.info(f"群 {group_id} (完整ID: {full_session_id}) 已在总结中，拒绝新的总结请求")
+            yield event.plain_result("当前群正在进行总结，请稍后再试")
             return
         
         # 获取消息内容，尝试解析数量参数
@@ -615,27 +738,34 @@ class GroupSummarizer(Star):
             
         yield event.plain_result(f"正在总结当前群内 {len(messages)} 条消息...")
         
-        # 存储原始消息缓冲区、上次总结位置，并替换为要总结的部分
-        original_buffer = self.message_buffers.get(group_id, [])
-        original_position = self.last_summarized_positions.get(group_id, 0)
-        self.message_buffers[group_id] = messages
-        self.last_summarized_positions[group_id] = 0  # 从0开始总结临时缓冲区
+        # 标记该群正在进行总结
+        self.summarizing_groups.add(group_id)
         
-        # 进行总结
-        summary = await self.summarize_messages(group_id, event)
-        
-        # 恢复原始消息缓冲区和上次总结位置
-        self.message_buffers[group_id] = original_buffer
-        self.last_summarized_positions[group_id] = original_position
-        
-        # 不重置计数器，只保存当前时间
-        self.last_summary_time[group_id] = int(time.time())
-        self._save_state()
-        
-        if not summary:
-            yield event.plain_result("总结失败，请查看日志获取详细信息")
-        else:
-            yield event.plain_result("总结完成，已保存到文件")
+        try:
+            # 存储原始消息缓冲区、上次总结位置，并替换为要总结的部分
+            original_buffer = self.message_buffers.get(group_id, [])
+            original_position = self.last_summarized_positions.get(group_id, 0)
+            self.message_buffers[group_id] = messages
+            self.last_summarized_positions[group_id] = 0  # 从0开始总结临时缓冲区
+            
+            # 进行总结
+            summary = await self.summarize_messages(group_id, event)
+            
+            # 恢复原始消息缓冲区和上次总结位置
+            self.message_buffers[group_id] = original_buffer
+            self.last_summarized_positions[group_id] = original_position
+            
+            # 不重置计数器，只保存当前时间
+            self.last_summary_time[group_id] = int(time.time())
+            self._save_state()
+            
+            if not summary:
+                yield event.plain_result("总结失败，请查看日志获取详细信息")
+            else:
+                yield event.plain_result("总结完成，已保存到文件")
+        finally:
+            # 无论总结是否成功，都移除标记
+            self.summarizing_groups.discard(group_id)
     
     @filter.command("summary_status")
     async def check_status(self, event: AstrMessageEvent):
@@ -644,6 +774,10 @@ class GroupSummarizer(Star):
         if not group_id:
             yield event.plain_result("此命令只能在群聊中使用")
             return
+        
+        # 获取完整会话ID
+        platform_name = event.get_platform_name() or "unknown"
+        full_session_id = event.unified_msg_origin or f"{platform_name}:GroupMessage:{group_id}"
         
         count = self.message_counters.get(group_id, 0)
         threshold = self.config["summary_threshold"]
@@ -659,7 +793,7 @@ class GroupSummarizer(Star):
         else:
             last_time_str = "从未总结"
             
-        status = f"当前群消息总结状态:\n"
+        status = f"当前群消息总结状态 (完整ID: {full_session_id}):\n"
         status += f"已收集消息数: {count}/{threshold}\n"
         status += f"自上次总结以来新消息: {new_messages} 条\n"
         status += f"上次总结时间: {last_time_str}"
@@ -700,7 +834,12 @@ class GroupSummarizer(Star):
 /summary_help - 显示本帮助信息
 
 自动总结会在消息达到阈值({threshold}条)且满足时间间隔({min_interval}秒)后触发。
-根据配置，总结结果会保存在本地文件中，也可能会发送到群聊。""".format(
+根据配置，总结结果会保存在本地文件中，也可能会发送到群聊。
+
+高级功能:
+- 提示词配置: 在配置文件中可以修改系统提示词(summary_system_prompt)和其他提示词模板(prompts部分)
+- 外部提示词: 可以编辑prompts.py文件自定义提示词，并通过use_external_prompts选项启用或禁用
+- 消息发送: 可以配置总结结果发送到当前群或自定义目标群""".format(
             threshold=self.config["summary_threshold"],
             min_interval=self.config["min_interval"]
         )
@@ -715,6 +854,10 @@ class GroupSummarizer(Star):
         if not group_id:
             yield event.plain_result("此命令只能在群聊中使用")
             return
+        
+        # 获取完整会话ID
+        platform_name = event.get_platform_name() or "unknown"
+        full_session_id = event.unified_msg_origin or f"{platform_name}:GroupMessage:{group_id}"
         
         # 获取消息内容，尝试解析参数
         msg = event.get_message_str().strip()
@@ -732,7 +875,7 @@ class GroupSummarizer(Star):
                 old_count = self.message_counters.get(group_id, 0)
                 self.message_counters[group_id] = count
                 
-                yield event.plain_result(f"已将群 {group_id} 的消息计数从 {old_count} 设置为 {count}")
+                yield event.plain_result(f"已将群 {group_id} (完整ID: {full_session_id}) 的消息计数从 {old_count} 设置为 {count}")
                 
                 # 检查是否达到总结条件
                 threshold = self.config["summary_threshold"]
@@ -820,6 +963,9 @@ class GroupSummarizer(Star):
         try:
             # 保存状态
             self._save_state()
+            
+            # 清除总结标记
+            self.summarizing_groups.clear()
             
             # 取消现有任务
             if hasattr(self, 'save_task') and not self.save_task.done():

@@ -48,7 +48,7 @@
 总结结果会根据配置：
 1. 保存在 `data/group_summaries/` 目录下，文件名格式为：`群ID_日期_时间.txt`
 2. 如果配置了发送选项，还会将总结内容发送到当前群聊或指定的群聊
-
+特别感谢astrbot_plugin_push_lite提供的api
 总结文件包含以下内容：
 - 群名称和群ID
 - 总结时间
@@ -279,3 +279,8 @@ python api_client.py --token "您的API令牌" --umo "目标会话ID" --type tex
    - 修复权限检查错误，使用正确的`permission_type`
    - 修复枚举值错误，使用正确的`EventMessageType.GROUP_MESSAGE`
    - 修复导入错误，移除不必要的导入语句
+  
+
+
+
+   - TODO：保存群聊消息到本地，设置多个总结消息的id，设置只针对自定义白名单启动总结，支持qq
