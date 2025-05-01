@@ -112,5 +112,54 @@
         }
       }
     }
+  },
+  "llm_config": {
+    "description": "LLM提供商设置",
+    "type": "object",
+    "hint": "配置使用的大语言模型提供商",
+    "items": {
+      "provider_name": {
+        "description": "LLM提供商名称",
+        "type": "string",
+        "hint": "设置为具体的提供商ID（如'openai'、'zhipu'等），留空则使用AstrBot当前默认提供商",
+        "default": ""
+      },
+      "use_custom_api": {
+        "description": "是否使用自定义API",
+        "type": "bool",
+        "hint": "开启后将使用下方配置的自定义API而非AstrBot内置提供商",
+        "default": false
+      },
+      "api_base": {
+        "description": "API基础URL",
+        "type": "string",
+        "hint": "OpenAI兼容接口的基础URL，如 https://api.openai.com/v1",
+        "default": "https://api.openai.com/v1"
+      },
+      "api_key": {
+        "description": "API密钥",
+        "type": "string",
+        "hint": "访问API所需的密钥",
+        "default": ""
+      },
+      "model": {
+        "description": "模型名称",
+        "type": "string",
+        "hint": "要使用的模型名称，如gpt-3.5-turbo",
+        "default": "gpt-3.5-turbo"
+      },
+      "temperature": {
+        "description": "温度参数",
+        "type": "float",
+        "hint": "控制生成文本的随机性，值越高随机性越大(0.0-2.0)",
+        "default": 0.7
+      },
+      "max_tokens": {
+        "description": "最大生成令牌数",
+        "type": "int",
+        "hint": "单次生成的最大令牌数量",
+        "default": 2000
+      }
+    }
   }
 } 
