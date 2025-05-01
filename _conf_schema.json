@@ -2,15 +2,9 @@
   "summary_threshold": {
     "description": "收集多少条消息后触发总结",
     "type": "int",
-    "hint": "达到这个数量的消息后将触发自动总结",
+    "hint": "达到这个数量的消息后将触发自动总结，同时用于确定缓冲区大小",
     "default": 300,
     "obvious_hint": false
-  },
-  "max_buffer_size": {
-    "description": "每个群聊最多保存的消息数量",
-    "type": "int",
-    "hint": "超过此数量后将清理最旧的消息",
-    "default": 500
   },
   "min_interval": {
     "description": "两次总结之间的最小时间间隔(秒)",
